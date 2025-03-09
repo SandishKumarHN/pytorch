@@ -229,7 +229,7 @@ class SymIntEqByExpr:
 
 
 def _nested_int_aware_sort(
-    tup: tuple[Union[SymInt, int], int]
+    tup: tuple[Union[SymInt, int], int],
 ) -> tuple[int, Union[SymInt, int], int]:
     return (
         # Order nested ints by their coefficients.
@@ -1265,7 +1265,7 @@ def sym_eq(x: _T, y: _T) -> Union[bool, SymBool]:
 
 
 def guard_scalar(
-    a: Union[SymBool, SymInt, SymFloat, int, bool, float]
+    a: Union[SymBool, SymInt, SymFloat, int, bool, float],
 ) -> Union[bool, int, float]:
     if isinstance(a, (SymBool, bool)):
         return guard_bool(a)
@@ -1895,7 +1895,7 @@ class SubclassSymbolicContext(StatefulSymbolicContext):
 
 
 def is_symbolic(
-    val: Union[int, SymInt, float, SymFloat, bool, SymBool]
+    val: Union[int, SymInt, float, SymFloat, bool, SymBool],
 ) -> TypeGuard[Union[SymInt, SymFloat, SymBool]]:
     if isinstance(val, (int, float, bool)):
         return False
@@ -2131,7 +2131,7 @@ def _sympy_cast_symbool_to_symint_guardless(x: SympyBoolean) -> sympy.Expr:
 
 
 def cast_symbool_to_symint_guardless(
-    symbool: Union[bool, torch.SymBool]
+    symbool: Union[bool, torch.SymBool],
 ) -> Union[int, torch.SymInt]:
     if isinstance(symbool, bool):
         return 1 if symbool else 0
@@ -2255,12 +2255,10 @@ class _ShapeGuardPrinter(abc.ABC):
         return self.print_source(self.symbol_to_source[expr][0])
 
     @abc.abstractmethod
-    def print_source(self, source: Source) -> str:
-        ...
+    def print_source(self, source: Source) -> str: ...
 
     @abc.abstractmethod
-    def doprint(self, expr: sympy.Expr) -> str:
-        ...
+    def doprint(self, expr: sympy.Expr) -> str: ...
 
 
 class ShapeGuardPythonPrinter(_ShapeGuardPrinter, PythonPrinter):
@@ -2372,9 +2370,9 @@ class DimConstraints:
         source_name_to_debug_name: Mapping[str, str],
     ) -> None:
         # We try to solve systems of inequalities with 1 free variable.
-        self._univariate_inequalities: dict[
-            sympy.Symbol, set[SympyBoolean]
-        ] = defaultdict(set)
+        self._univariate_inequalities: dict[sympy.Symbol, set[SympyBoolean]] = (
+            defaultdict(set)
+        )
         # Among them, we prioritize solving for a free variable that has equalities.
         # NOTE: _symbols_with_equalities is always a subset of _univariate_inequalities.keys()
         # and removing a symbol from the former => removing it from the latter.
@@ -4546,9 +4544,9 @@ class ShapeEnv:
                         sloc,
                     )
                 else:
-                    self.var_to_range[
-                        sympy_expr
-                    ] = self._default_unspecified_value_range()
+                    self.var_to_range[sympy_expr] = (
+                        self._default_unspecified_value_range()
+                    )
                     self.var_to_range_sloc[sympy_expr] = ValueRangesSLoc(sloc, sloc)
 
                 # Small performance optimization: if we have a min-max constraint,
@@ -4837,9 +4835,9 @@ class ShapeEnv:
         symbol_to_source: dict[sympy.Symbol, list[Source]] = collections.defaultdict(
             list
         )
-        symbol_to_constraints: defaultdict[
-            sympy.Symbol, set[Constraint]
-        ] = collections.defaultdict(set)
+        symbol_to_constraints: defaultdict[sympy.Symbol, set[Constraint]] = (
+            collections.defaultdict(set)
+        )
         constraint_violations: list[tuple[bool, str, Callable[[], str]]] = []
 
         printers: list[_ShapeGuardPrinter] = []
@@ -6768,9 +6766,11 @@ class ShapeEnv:
             if static_expr is not None:
                 self.log.debug(
                     "eval %s == %s [statically known]",
-                    f"size_oblivious({orig_expr})"
-                    if size_oblivious
-                    else size_oblivious,
+                    (
+                        f"size_oblivious({orig_expr})"
+                        if size_oblivious
+                        else size_oblivious
+                    ),
                     static_expr,
                 )
                 if hint is not None:
@@ -7198,6 +7198,17 @@ class _PythonMsgPrinter(PythonPrinter):
         return self.src_map[sym.name][0]
 
 
+def is_non_negative_check(condition_str):
+    """
+    Check if a condition string is checking for non-negative values (>= 0)
+    Returns the variable name if it's a non-negative check, None otherwise
+    """
+    # Pattern to match expressions like "x >= 0", "x.shape[0] >= 0", etc.
+    pattern = r"([a-zA-Z0-9_\.\[\]]+)\s*>=\s*0"
+    match = re.match(pattern, condition_str.strip())
+    return match.group(1) if match else None
+
+
 def _suggest_torch_checks(
     e: GuardOnDataDependentSymNode, src_map: defaultdict[str, list[str]]
 ) -> None:
@@ -7210,12 +7221,17 @@ def _suggest_torch_checks(
     printer = _PythonMsgPrinter(src_map)
     msg = e.args[0]
     msg += "\nTo fix the error, insert one of the following checks before this call:"
-    # suggested fixes to resolve `cond`` are to tell the compiler to assume
-    # either `cond` or its negation (the user will need to select which)
-    suggested_fixes = [
-        f"torch._check({printer.doprint(cond)})",
-        f"torch._check({printer.doprint(sympy.Not(cond))})",
-    ]
+    cond_str = printer.doprint(cond)
+    var_name = is_non_negative_check(cond_str)
+    suggested_fixes = []
+    if var_name and ">= 0" in cond_str:
+        # This is a non-negative check, suggest _check_is_size
+        suggested_fixes.append(f"torch._check_is_size({var_name})")
+        suggested_fixes.append(f"torch._check({printer.doprint(sympy.Not(cond))})")
+    else:
+        # Regular case
+        suggested_fixes.append(f"torch._check({printer.doprint(cond)})")
+        suggested_fixes.append(f"torch._check({printer.doprint(sympy.Not(cond))})")
     for i, fix in enumerate(suggested_fixes):
         msg += f"\n  {i + 1}. {fix}"
     src_mapped = ", ".join(
