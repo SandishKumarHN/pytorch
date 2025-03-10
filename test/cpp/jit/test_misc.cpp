@@ -3148,5 +3148,199 @@ TEST(ConstantPropagation, CustomClassesCanBePropagated) {
 #endif
 }
 
+// Helper to create a graph with symbolic shapes
+std::shared_ptr<Graph> createGraphWithSymbolicShapes() {
+  auto graph = std::make_shared<Graph>();
+  
+  // Create input tensor
+  Value* input = graph->addInput()->setType(TensorType::get());
+  
+  // Create sym_size.int node
+  Node* sym_size = graph->create(Symbol::fromQualString("aten::sym_size.int"), {input, graph->insertConstant(0)});
+  graph->insertNode(sym_size);
+  Value* batch_size = sym_size->output();
+  
+  // Create view node that uses the symbolic size
+  Node* view = graph->create(Symbol::fromQualString("aten::view"), 
+                            {input, graph->insertNode(
+                                graph->create(Symbol::fromQualString("prim::ListConstruct"), 
+                                            {batch_size, graph->insertConstant(-1)})
+                            )->output()});
+  graph->insertNode(view);
+  
+  // Set graph output
+  graph->registerOutput(view->output());
+  
+  return graph;
+}
+
+// Helper to count sym_size.int nodes in a graph
+int countSymSizeNodes(const std::shared_ptr<Graph>& graph) {
+  int count = 0;
+  for (Node* n : graph->nodes()) {
+    if (isSymSizeNode(n)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// Test that isSymSizeNode correctly identifies sym_size.int nodes
+TEST(DecompositionRegistryTest, TestIsSymSizeNode) {
+  auto graph = std::make_shared<Graph>();
+  
+  // Create a sym_size.int node
+  Node* input = graph->addInput()->node();
+  Node* sym_size = graph->create(Symbol::fromQualString("aten::sym_size.int"), 
+                                {input->output(), graph->insertConstant(0)});
+  graph->insertNode(sym_size);
+  
+  // Create a different node
+  Node* add = graph->create(Symbol::fromQualString("aten::add"), 
+                           {input->output(), graph->insertConstant(1)});
+  graph->insertNode(add);
+  
+  // Test the function
+  EXPECT_TRUE(isSymSizeNode(sym_size));
+  EXPECT_FALSE(isSymSizeNode(add));
+}
+
+// Test running decompositions while preserving dynamic shapes
+TEST(DecompositionRegistryTest, TestRunDecompositionsPreservingDynamicShapes) {
+  auto graph = createGraphWithSymbolicShapes();
+  
+  // Count initial sym_size nodes
+  int initialCount = countSymSizeNodes(graph);
+  EXPECT_GT(initialCount, 0);
+  
+  // Run decompositions
+  RunDecompositions(graph);
+  
+  // Verify sym_size nodes are still present
+  int finalCount = countSymSizeNodes(graph);
+  EXPECT_GT(finalCount, 0);
+}
+
+// Test that dynamic shapes are preserved in a more complex scenario
+TEST(DecompositionRegistryTest, TestDynamicShapesPreservationComplex) {
+  auto graph = std::make_shared<Graph>();
+  
+  // Create input tensor
+  Value* input = graph->addInput()->setType(TensorType::get());
+  
+  // Create sym_size.int nodes for multiple dimensions
+  Node* sym_size_0 = graph->create(Symbol::fromQualString("aten::sym_size.int"), {input, graph->insertConstant(0)});
+  graph->insertNode(sym_size_0);
+  Value* batch_size = sym_size_0->output();
+  
+  Node* sym_size_1 = graph->create(Symbol::fromQualString("aten::sym_size.int"), {input, graph->insertConstant(1)});
+  graph->insertNode(sym_size_1);
+  Value* channels = sym_size_1->output();
+  
+  // Create operations that use these symbolic sizes
+  Node* mul = graph->create(Symbol::fromQualString("aten::mul"), {batch_size, channels});
+  graph->insertNode(mul);
+  
+  // Create view node that uses the symbolic sizes
+  Node* view = graph->create(Symbol::fromQualString("aten::view"), 
+                            {input, graph->insertNode(
+                                graph->create(Symbol::fromQualString("prim::ListConstruct"), 
+                                            {batch_size, channels, graph->insertConstant(-1)})
+                            )->output()});
+  graph->insertNode(view);
+  
+  // Set graph output
+  graph->registerOutput(view->output());
+  
+  // Count initial sym_size nodes
+  int initialCount = countSymSizeNodes(graph);
+  EXPECT_EQ(initialCount, 2);
+  
+  // Run decompositions
+  RunDecompositions(graph);
+  
+  // Verify sym_size nodes are still present
+  int finalCount = countSymSizeNodes(graph);
+  EXPECT_EQ(finalCount, 2);
+}
+
+// Test that dynamic shapes are preserved when decomposing view operations
+TEST(DecompositionRegistryTest, TestDynamicShapesPreservationWithViewOps) {
+  auto graph = std::make_shared<Graph>();
+  
+  // Create input tensor
+  Value* input = graph->addInput()->setType(TensorType::get());
+  
+  // Create sym_size.int node for batch dimension
+  Node* sym_size = graph->create(Symbol::fromQualString("aten::sym_size.int"), {input, graph->insertConstant(0)});
+  graph->insertNode(sym_size);
+  Value* batch_size = sym_size->output();
+  
+  // Create reshape node that uses the symbolic size
+  Node* reshape = graph->create(Symbol::fromQualString("aten::reshape"), 
+                              {input, graph->insertNode(
+                                  graph->create(Symbol::fromQualString("prim::ListConstruct"), 
+                                              {batch_size, graph->insertConstant(-1)})
+                              )->output()});
+  graph->insertNode(reshape);
+  
+  // Set graph output
+  graph->registerOutput(reshape->output());
+  
+  // Count initial sym_size nodes
+  int initialCount = countSymSizeNodes(graph);
+  EXPECT_EQ(initialCount, 1);
+  
+  // Run decompositions
+  RunDecompositions(graph);
+  
+  // Verify sym_size nodes are still present
+  int finalCount = countSymSizeNodes(graph);
+  EXPECT_EQ(finalCount, 1);
+}
+
+// Test that dynamic shapes are preserved with multiple operations in sequence
+TEST(DecompositionRegistryTest, TestDynamicShapesPreservationWithSequentialOps) {
+  auto graph = std::make_shared<Graph>();
+  
+  // Create input tensor
+  Value* input = graph->addInput()->setType(TensorType::get());
+  
+  // Create sym_size.int node
+  Node* sym_size = graph->create(Symbol::fromQualString("aten::sym_size.int"), {input, graph->insertConstant(0)});
+  graph->insertNode(sym_size);
+  Value* batch_size = sym_size->output();
+  
+  // Create a sequence of operations
+  Node* add = graph->create(Symbol::fromQualString("aten::add"), {input, graph->insertConstant(1.0)});
+  graph->insertNode(add);
+  
+  Node* mul = graph->create(Symbol::fromQualString("aten::mul"), {add->output(), graph->insertConstant(2.0)});
+  graph->insertNode(mul);
+  
+  // Use the symbolic size in a view operation
+  Node* view = graph->create(Symbol::fromQualString("aten::view"), 
+                            {mul->output(), graph->insertNode(
+                                graph->create(Symbol::fromQualString("prim::ListConstruct"), 
+                                            {batch_size, graph->insertConstant(-1)})
+                            )->output()});
+  graph->insertNode(view);
+  
+  // Set graph output
+  graph->registerOutput(view->output());
+  
+  // Count initial sym_size nodes
+  int initialCount = countSymSizeNodes(graph);
+  EXPECT_EQ(initialCount, 1);
+  
+  // Run decompositions
+  RunDecompositions(graph);
+  
+  // Verify sym_size nodes are still present
+  int finalCount = countSymSizeNodes(graph);
+  EXPECT_EQ(finalCount, 1);
+}
+
+
 } // namespace jit
 } // namespace torch

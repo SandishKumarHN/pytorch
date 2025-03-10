@@ -7,6 +7,9 @@
 
 namespace torch::jit {
 
+// Map to track original symbolic size nodes and their corresponding values
+using SymSizeMap = std::unordered_map<Value*, Value*>;
+
 TORCH_API std::optional<std::shared_ptr<Graph>> GetDecomposition(
     const FunctionSchema& schema);
 
@@ -29,5 +32,9 @@ TORCH_API void run_jit_decomposition(
     torch::jit::Stack* stack);
 
 TORCH_API bool has_jit_decomposition(const FunctionSchema& schema);
+
+// TORCH_API void RestoreSymbolicSizes(std::shared_ptr<Graph>& graph, const SymSizeMap& symSizeMap);
+
+// TORCH_API void RunDecompositionsWithSymSizeTracking(Block* block, SymSizeMap& symSizeMap);
 
 } // namespace torch::jit

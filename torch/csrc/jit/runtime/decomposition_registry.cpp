@@ -30,6 +30,12 @@ std::unordered_map<const FunctionSchema*, std::unique_ptr<Function>>
 
 std::unordered_map<const FunctionSchema*, Function*> schema_to_function;
 
+// Check if a node is a symbolic size operation (sym_size.int)
+static bool isSymSizeNode(Node* n) {
+  static const c10::Symbol sym_size_int = Symbol::fromQualString("aten::sym_size.int");
+  return n->kind() == sym_size_int;
+}
+
 void loadModule(const CompilationUnit& module) {
   const auto& mappings = GetDecompositionMapping().getAllKeysAndValues();
   for (const auto& pair : mappings) {
@@ -52,22 +58,13 @@ void loadDecompositionFunctions() {
     return;
   }
 
-  auto src = std::make_shared<Source>(GetSerializedDecompositions());
-  std::stringstream ss;
-  std::vector<at::IValue> constantTable;
-  auto resolver = std::make_shared<SourceImporterImpl>(
-      compilation_unit,
-      &constantTable,
-      [&](const std::string& name) -> std::shared_ptr<Source> { return src; },
-      1);
-  compilation_unit->define(
-      std::nullopt, GetSerializedDecompositions(), resolver, nullptr);
   loadModule(*compilation_unit);
+  // The JitDecomp instance is already registered via registerJitDecomp
+  // No need to fetch a registerer function
 }
 
-} // anonymous namespace
-
-static void DecomposeOp(Node* n) {
+// Preserve symbolic size information during decomposition
+static void DecomposeOp(Node* n, SymSizeMap& symSizeMap) {
   auto schema = n->maybeSchema();
   if (!schema) {
     return;
@@ -76,6 +73,17 @@ static void DecomposeOp(Node* n) {
   if (!decomposition) {
     return;
   }
+  
+  // Check if this node produces any outputs used by sym_size.int nodes
+  for (Value* output : n->outputs()) {
+    for (const auto& use : output->uses()) {
+      if (isSymSizeNode(use.user)) {
+        // Remember this relationship to preserve it after decomposition
+        symSizeMap[use.user->output()] = output;
+      }
+    }
+  }
+  
   WithInsertPoint guard(n);
   auto outputs = insertGraph(*n->owningGraph(), **decomposition, n->inputs());
   TORCH_INTERNAL_ASSERT(outputs.size() == n->outputs().size());
@@ -85,24 +93,40 @@ static void DecomposeOp(Node* n) {
   n->destroy();
 }
 
-static void RunDecompositions(Block* block) {
+// Process the graph to restore symbolic size information
+static void RestoreSymbolicSizes(std::shared_ptr<Graph>& graph, const SymSizeMap& symSizeMap) {
+  if (symSizeMap.empty()) {
+    return;
+  }
+  
+  for (auto& pair : symSizeMap) {
+    Value* symSizeValue = pair.first;
+    Value* originalInput = pair.second;
+    
+    // If the symbolic size value is still in use, we need to restore its symbolic nature
+    if (!symSizeValue->uses().empty()) {
+      // Create a new sym_size.int node to replace the concrete value
+      WithInsertPoint guard(graph->block()->nodes().front());
+      Node* newSymSizeNode = graph->create(Symbol::fromQualString("aten::sym_size.int"), 
+                                          {originalInput, graph->insertConstant(0)});
+      graph->insertNode(newSymSizeNode);
+      symSizeValue->replaceAllUsesWith(newSymSizeNode->output());
+    }
+  }
+}
+
+static void RunDecompositionsWithSymSizeTracking(Block* block, SymSizeMap& symSizeMap) {
   for (auto it = block->nodes().begin(); it != block->nodes().end();) {
     Node* n = *it;
     it++; // advance iterator bc the current node may be destroyed
     for (Block* b : n->blocks()) {
-      RunDecompositions(b);
+      RunDecompositionsWithSymSizeTracking(b, symSizeMap);
     }
-    DecomposeOp(n);
+    DecomposeOp(n, symSizeMap);
   }
 }
 
-void RunDecompositions(std::shared_ptr<Graph> g) {
-  RunDecompositions(g->block());
-  for ([[maybe_unused]] const auto _ : c10::irange(2)) {
-    PeepholeOptimize(g, /*disable_shape_peephole*/ true);
-    ConstantPropagation(g);
-  }
-}
+// } // namespace
 
 std::optional<std::shared_ptr<Graph>> GetDecomposition(
     const FunctionSchema& schema) {
@@ -157,6 +181,22 @@ void RegisterDecomposition(
   schema_to_decomposition[&schema] = g;
 }
 
+void RunDecompositions(std::shared_ptr<Graph> g) {
+  // Map to track symbolic size relationships
+  SymSizeMap symSizeMap;
+  
+  // Run decompositions with tracking
+  RunDecompositionsWithSymSizeTracking(g->block(), symSizeMap);
+  
+  // Restore symbolic size information
+  RestoreSymbolicSizes(g, symSizeMap);
+  
+  for ([[maybe_unused]] const auto _ : c10::irange(2)) {
+    PeepholeOptimize(g, /*disable_shape_peephole*/ true);
+    ConstantPropagation(g);
+  }
+}
+
 // see NOTE: [Jit Decomposition Interface]
 struct JitDecomp final : torch::autograd::impl::JitDecompInterface {
   bool has_jit_decomposition(const c10::FunctionSchema& schema) const override;
@@ -209,4 +249,13 @@ Function* GetDecompositionExecutor(const char* schema_literal) {
   return GetDecompositionExecutor(schema);
 }
 
+// Export the static functions to fulfill the API declarations
+void RestoreSymbolicSizes(std::shared_ptr<Graph>& graph, const SymSizeMap& symSizeMap) {
+  ::torch::jit::RestoreSymbolicSizes(graph, symSizeMap);
+}
+
+void RunDecompositionsWithSymSizeTracking(Block* block, SymSizeMap& symSizeMap) {
+  ::torch::jit::RunDecompositionsWithSymSizeTracking(block, symSizeMap);
+}
+}
 } // namespace torch::jit
