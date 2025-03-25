@@ -1021,6 +1021,36 @@ def bound_sympy(
             )
         ),
     )
+    
+    # Special case for expressions of the form x - (x % y)
+    if (isinstance(expr, sympy.Add) and len(expr.args) == 2 and 
+            isinstance(expr.args[1], sympy.Mul) and len(expr.args[1].args) == 2 and 
+            expr.args[1].args[0] == -1):
+        x = expr.args[0]
+        if isinstance(expr.args[1].args[1], sympy.Mod) and expr.args[1].args[1].args[0] == x:
+            # We have an expression of the form x - (x % y)
+            y = expr.args[1].args[1].args[1]
+            
+            # Get the bounds for x
+            ranges_copy = ranges or {}
+            context = torch._guards.TracingContext.try_get()
+            if context and context.fake_mode.shape_env:
+                if ranges_copy:
+                    ranges_copy = {**context.fake_mode.shape_env.var_to_range, **ranges_copy}
+                else:
+                    ranges_copy = context.fake_mode.shape_env.var_to_range
+                    
+            # Recursively compute bounds for x
+            x_bounds = sympy_interp(
+                SymPyValueRangeAnalysis, ranges_copy, x, 
+                missing_handler=lambda s: missing_handler(s)
+            )
+            
+            # For x - (x % y), the result is always a multiple of y that is <= x
+            # If x >= 0, then the result is >= 0
+            if x_bounds.lower >= 0:
+                return ValueRanges(0, x_bounds.upper)
+
     if isinstance(expr, sympy.Number):
         return ValueRanges.wrap(expr)
 

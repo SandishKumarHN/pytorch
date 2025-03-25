@@ -35,7 +35,7 @@ from torch.utils._sympy.reference import (
 )
 from torch.utils._sympy.singleton_int import SingletonInt
 from torch.utils._sympy.solve import INEQUALITY_TYPES, mirror_rel_op, try_solve
-from torch.utils._sympy.value_ranges import ValueRanges
+from torch.utils._sympy.value_ranges import bound_sympy, ValueRanges
 from torch._inductor.bounds import ValueRangeAnalysis
 
 
@@ -384,6 +384,25 @@ class TestValueRanges(TestCase):
                 ref_r = getattr(ValueRangeAnalysis, fn)(a, b)
                 r = getattr(ReferenceAnalysis, fn)(a, b)
                 self.assertIn(r, ref_r)
+
+    def test_bound_sympy_mod(self):
+        # Create a symbol with bounds [2, inf]
+        s0 = sympy.Symbol('s0', integer=True, positive=True)
+        s0_range = {s0: ValueRanges(2, int_oo)}
+        
+        # Test the expression s0 - (s0 % 8)
+        expr = s0 - (s0 % 8)
+        result = bound_sympy(expr, s0_range)
+        
+        # The correct result should be [0, inf]
+        self.assertEqual(result.lower, 0)
+        self.assertTrue(result.upper == int_oo or result.upper == sympy.oo)
+        
+        # Test with a different modulus
+        expr2 = s0 - (s0 % 5)
+        result2 = bound_sympy(expr2, s0_range)
+        self.assertEqual(result2.lower, 0)
+        self.assertTrue(result2.upper == int_oo or result2.upper == sympy.oo)
 
 
 class TestSympyInterp(TestCase):
